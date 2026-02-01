@@ -3,6 +3,7 @@ package com.technodrome.diffusion.network;
 import ai.djl.ndarray.NDArray;
 import ai.djl.ndarray.NDList;
 import ai.djl.ndarray.NDManager;
+import ai.djl.ndarray.types.DataType;
 import ai.djl.ndarray.types.Shape;
 import ai.djl.nn.AbstractBlock;
 import ai.djl.nn.Parameter;
@@ -152,7 +153,8 @@ public class MlpConvDense extends AbstractBlock {
         lowerMlp.prepare(inputShapes);
 
         // Upper MLP dimensions
-        int lowerOutputChannels = lowerHiddenChannels;
+        // Note: lowerMlp output channels = (lowerHiddenChannels / numScales) * numScales due to integer division
+        int lowerOutputChannels = (lowerHiddenChannels / numScales) * numScales;
         int prevChannels = lowerOutputChannels;
 
         for (int i = 0; i < numUpperLayers; i++) {
@@ -171,6 +173,11 @@ public class MlpConvDense extends AbstractBlock {
         muBias.setShape(new Shape(muOutputChannels));
         sigmaWeight.setShape(new Shape(sigmaOutputChannels, prevChannels, 1, 1));
         sigmaBias.setShape(new Shape(sigmaOutputChannels));
+    }
+
+    @Override
+    public void initializeChildBlocks(NDManager manager, DataType dataType, Shape... inputShapes) {
+        lowerMlp.initialize(manager, dataType, inputShapes);
     }
 
     @Override

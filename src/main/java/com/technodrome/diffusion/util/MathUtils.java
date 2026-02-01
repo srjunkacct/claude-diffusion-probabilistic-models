@@ -156,8 +156,8 @@ public final class MathUtils {
 
         // Reshape to (batch, channels, height/2, 2, width/2, 2)
         NDArray reshaped = x.reshape(batch, channels, height / 2, 2, width / 2, 2);
-        // Mean over axes 3 and 5
-        return reshaped.mean(new int[]{3, 5});
+        // Mean over axes 5 then 3 (chain for PyTorch compatibility)
+        return reshaped.mean(new int[]{5}).mean(new int[]{3});
     }
 
     /**

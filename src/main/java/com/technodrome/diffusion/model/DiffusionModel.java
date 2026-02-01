@@ -90,6 +90,11 @@ public class DiffusionModel extends AbstractBlock {
         network.prepare(inputShapes);
     }
 
+    @Override
+    public void initializeChildBlocks(NDManager manager, DataType dataType, Shape... inputShapes) {
+        network.initialize(manager, dataType, inputShapes);
+    }
+
     /**
      * Initialize cached diffusion parameters.
      */
@@ -227,8 +232,8 @@ public class DiffusionModel extends AbstractBlock {
                 .add(sigmaPred.log());
         NDArray loss = kl.mul(isT0.neg().add(1)).add(reconLoss.mul(isT0));
 
-        // Sum over pixels, mean over batch
-        return loss.sum(new int[]{1, 2, 3}).mean();
+        // Sum over pixels, mean over batch (chain sum for PyTorch compatibility)
+        return loss.sum(new int[]{3}).sum(new int[]{2}).sum(new int[]{1}).mean();
     }
 
     private NDArray computePosteriorMean(NDArray x0, NDArray xt, int[] timesteps, NDManager manager) {

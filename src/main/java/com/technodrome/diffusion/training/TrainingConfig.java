@@ -17,8 +17,9 @@ public class TrainingConfig {
     private double step1Beta = 1e-4;
 
     // Network architecture
-    private int lowerHiddenChannels = 128;
-    private int upperHiddenChannels = 64;
+    // Note: lowerHiddenChannels should be divisible by numScales
+    private int lowerHiddenChannels = 126;  // 126 = 42 * 3 (divisible by numScales)
+    private int upperHiddenChannels = 63;   // 63 = 21 * 3 (divisible by numScales)
     private int numLowerLayers = 4;
     private int numUpperLayers = 2;
     private int numScales = 3;

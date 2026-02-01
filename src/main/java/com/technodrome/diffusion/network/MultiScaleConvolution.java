@@ -169,30 +169,29 @@ public class MultiScaleConvolution extends AbstractBlock {
 
         Shape weightShape = weight.getShape();
         long outChannels = weightShape.get(0);
-        int kH = (int) weightShape.get(2);
-        int kW = (int) weightShape.get(3);
 
-        int pad = kH / 2;
-        long outHeight = height - kH + 1 + 2 * pad;
-        long outWidth = width - kW + 1 + 2 * pad;
-
-        // Simple implementation: use im2col style or just reshape operations
-        // For this port, we'll use a basic approach with reshape and matmul
         NDManager manager = input.getManager();
 
-        // Flatten spatial dimensions for matrix multiplication approach
-        // output[b, oc, h, w] = sum over ic, kh, kw of input[b, ic, h+kh, w+kw] * weight[oc, ic, kh, kw]
+        // Simplified 1x1-like convolution: channel mixing with spatial preservation
+        // Average weight over kernel dimensions (chain mean calls for PyTorch compatibility)
+        NDArray avgWeight = weight.mean(new int[]{3}).mean(new int[]{2});  // (outChannels, inChannels)
 
-        // For simplicity in this port, just apply a linear transformation per channel
-        // This is an approximation - actual conv would need im2col
-        NDArray flatInput = input.reshape(batch, inChannels, -1);  // (batch, inChannels, H*W)
-        NDArray flatWeight = weight.reshape(outChannels, -1);       // (outChannels, inChannels*kH*kW)
+        // Reshape input for batch matrix multiplication: (batch, inChannels, H*W)
+        NDArray flatInput = input.reshape(batch, inChannels, height * width);
 
-        // Simplified: project channels (ignoring spatial convolution structure)
-        // This will be replaced with proper Conv2d in Block form
-        NDArray avgWeight = weight.mean(new int[]{2, 3});  // (outChannels, inChannels)
-        NDArray output = avgWeight.matMul(flatInput.mean(new int[]{1}, true).squeeze(new int[]{1}).transpose());
-        output = output.transpose().reshape(batch, outChannels, height, width);
+        // For each batch, compute: output = avgWeight @ input
+        // avgWeight: (outChannels, inChannels)
+        // flatInput: (batch, inChannels, H*W)
+        // We need to do batched matmul
+
+        // Transpose flatInput to (batch, H*W, inChannels) for proper matmul
+        NDArray inputTransposed = flatInput.transpose(0, 2, 1);  // (batch, H*W, inChannels)
+
+        // Compute output: (batch, H*W, inChannels) @ (inChannels, outChannels) = (batch, H*W, outChannels)
+        NDArray output = inputTransposed.matMul(avgWeight.transpose());  // (batch, H*W, outChannels)
+
+        // Transpose back to (batch, outChannels, H*W) and reshape
+        output = output.transpose(0, 2, 1).reshape(batch, outChannels, height, width);
 
         // Add bias
         output = output.add(bias.reshape(1, outChannels, 1, 1));
@@ -215,9 +214,10 @@ public class MultiScaleConvolution extends AbstractBlock {
             x = x.get(String.format(":, :, :%d, :%d", newHeight, newWidth));
         }
 
-        // Reshape and mean pool
+        // Reshape and mean pool - chain mean calls for PyTorch compatibility
         NDArray reshaped = x.reshape(batch, channels, newHeight / 2, 2, newWidth / 2, 2);
-        return reshaped.mean(new int[]{3, 5});
+        // Mean over axis 5 first, then axis 3 (indices shift after first mean)
+        return reshaped.mean(new int[]{5}).mean(new int[]{3});
     }
 
     private NDArray upsample2x(NDArray x) {

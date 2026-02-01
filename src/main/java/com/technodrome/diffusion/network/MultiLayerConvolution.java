@@ -3,6 +3,7 @@ package com.technodrome.diffusion.network;
 import ai.djl.ndarray.NDArray;
 import ai.djl.ndarray.NDList;
 import ai.djl.ndarray.NDManager;
+import ai.djl.ndarray.types.DataType;
 import ai.djl.ndarray.types.Shape;
 import ai.djl.nn.AbstractBlock;
 import ai.djl.nn.Parameter;
@@ -111,6 +112,26 @@ public class MultiLayerConvolution extends AbstractBlock {
 
             layerBiases.get(i).setShape(new Shape(currOutputChannels * numScales));
 
+            prevChannels = currOutputChannels * numScales;
+        }
+    }
+
+    @Override
+    public void initializeChildBlocks(NDManager manager, DataType dataType, Shape... inputShapes) {
+        Shape inputShape = inputShapes[0];
+        long height = inputShape.get(2);
+        long width = inputShape.get(3);
+
+        int prevChannels = inputChannels;
+        for (int i = 0; i < numLayers; i++) {
+            int currOutputChannels;
+            if (i == numLayers - 1) {
+                currOutputChannels = outputChannels / numScales;
+            } else {
+                currOutputChannels = hiddenChannels / numScales;
+            }
+
+            convLayers.get(i).initialize(manager, dataType, new Shape(1, prevChannels, height, width));
             prevChannels = currOutputChannels * numScales;
         }
     }
