@@ -6,7 +6,6 @@ import ai.djl.ndarray.NDManager;
 import ai.djl.ndarray.types.DataType;
 import ai.djl.ndarray.types.Shape;
 import ai.djl.nn.AbstractBlock;
-import ai.djl.nn.Parameter;
 import ai.djl.training.ParameterStore;
 import ai.djl.util.PairList;
 
@@ -17,7 +16,7 @@ import java.util.List;
  * Multi-layer convolutional network with multi-scale convolutions.
  *
  * Stacks multiple multi-scale convolution layers with leaky ReLU activations.
- * Optionally includes layer normalization or batch statistics.
+ * Uses DJL's built-in Conv2d blocks via MultiScaleConvolution.
  */
 public class MultiLayerConvolution extends AbstractBlock {
 
@@ -32,7 +31,6 @@ public class MultiLayerConvolution extends AbstractBlock {
     private final float leakySlope;
 
     private final List<MultiScaleConvolution> convLayers;
-    private final List<Parameter> layerBiases;
 
     /**
      * Create a multi-layer convolutional network.
@@ -61,7 +59,6 @@ public class MultiLayerConvolution extends AbstractBlock {
         this.leakySlope = leakySlope;
 
         this.convLayers = new ArrayList<>();
-        this.layerBiases = new ArrayList<>();
 
         // Create layers
         int prevChannels = inputChannels;
@@ -78,39 +75,6 @@ public class MultiLayerConvolution extends AbstractBlock {
                     prevChannels, currOutputChannels, numScales, kernelSize);
             addChildBlock("conv" + i, layer);
             convLayers.add(layer);
-
-            // Bias for residual or normalization
-            Parameter bias = addParameter(
-                    Parameter.builder()
-                            .setName("layer_bias" + i)
-                            .setType(Parameter.Type.BIAS)
-                            .build());
-            layerBiases.add(bias);
-
-            prevChannels = currOutputChannels * numScales;
-        }
-    }
-
-    @Override
-    public void prepare(Shape[] inputShapes) {
-        Shape inputShape = inputShapes[0];
-        long height = inputShape.get(2);
-        long width = inputShape.get(3);
-
-        // Prepare each conv layer
-        int prevChannels = inputChannels;
-        for (int i = 0; i < numLayers; i++) {
-            int currOutputChannels;
-            if (i == numLayers - 1) {
-                currOutputChannels = outputChannels / numScales;
-            } else {
-                currOutputChannels = hiddenChannels / numScales;
-            }
-
-            Shape[] layerInputShapes = new Shape[]{new Shape(1, prevChannels, height, width)};
-            convLayers.get(i).prepare(layerInputShapes);
-
-            layerBiases.get(i).setShape(new Shape(currOutputChannels * numScales));
 
             prevChannels = currOutputChannels * numScales;
         }
@@ -131,7 +95,7 @@ public class MultiLayerConvolution extends AbstractBlock {
                 currOutputChannels = hiddenChannels / numScales;
             }
 
-            convLayers.get(i).initialize(manager, dataType, new Shape(1, prevChannels, height, width));
+            convLayers.get(i).initialize(manager, dataType, new Shape(inputShape.get(0), prevChannels, height, width));
             prevChannels = currOutputChannels * numScales;
         }
     }
@@ -144,18 +108,13 @@ public class MultiLayerConvolution extends AbstractBlock {
             PairList<String, Object> params) {
 
         NDArray x = inputs.singletonOrThrow();
-        NDManager manager = x.getManager();
 
         for (int i = 0; i < numLayers; i++) {
-            // Apply multi-scale convolution
+            // Apply multi-scale convolution (Conv2d blocks handle bias internally)
             NDList convOutput = convLayers.get(i).forward(parameterStore, new NDList(x), training);
             x = convOutput.singletonOrThrow();
 
-            // Add bias (broadcast over spatial dimensions)
-            NDArray bias = parameterStore.getValue(layerBiases.get(i), x.getDevice(), training);
-            x = x.add(bias.reshape(1, -1, 1, 1));
-
-            // Apply leaky ReLU (except for last layer if needed)
+            // Apply leaky ReLU (except for last layer)
             if (i < numLayers - 1) {
                 x = LeakyRelu.apply(x, leakySlope);
             }

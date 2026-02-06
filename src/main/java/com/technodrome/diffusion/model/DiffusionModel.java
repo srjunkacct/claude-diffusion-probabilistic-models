@@ -23,7 +23,7 @@ import com.technodrome.diffusion.util.MathUtils;
 public class DiffusionModel extends AbstractBlock {
 
     private static final byte VERSION = 1;
-    private static final double MIN_SIGMA = 1e-5;
+    private static final double MIN_SIGMA = 1e-4;  // Increased for numerical stability
 
     private final int trajectoryLength;
     private final int numTemporalBasis;
@@ -83,11 +83,6 @@ public class DiffusionModel extends AbstractBlock {
                 28,   // width
                 1e-4  // step1Beta
         );
-    }
-
-    @Override
-    public void prepare(Shape[] inputShapes) {
-        network.prepare(inputShapes);
     }
 
     @Override
@@ -223,17 +218,26 @@ public class DiffusionModel extends AbstractBlock {
         NDArray muTrue = computePosteriorMean(x0, xt, timesteps, manager);
         NDArray sigmaTrue = computePosteriorStd(timesteps, manager);
 
+        // Ensure sigmas are not too small to prevent division explosion
+        NDArray sigmaPredSafe = sigmaPred.maximum(MIN_SIGMA);
+        NDArray sigmaTrueSafe = sigmaTrue.maximum(MIN_SIGMA);
+
         // KL divergence: D_KL(q || p) for each pixel
-        NDArray kl = MathUtils.gaussianKL(muTrue, sigmaTrue, muPred, sigmaPred);
+        NDArray kl = MathUtils.gaussianKL(muTrue, sigmaTrueSafe, muPred, sigmaPredSafe);
 
         // For t=0, use reconstruction loss instead
         NDArray isT0 = t.eq(0).toType(DataType.FLOAT32, false).reshape(-1, 1, 1, 1);
-        NDArray reconLoss = x0.sub(muPred).pow(2).div(sigmaPred.pow(2).mul(2))
-                .add(sigmaPred.log());
+        NDArray sigmaPredSq = sigmaPredSafe.pow(2).mul(2);
+        NDArray reconLoss = x0.sub(muPred).pow(2).div(sigmaPredSq)
+                .add(sigmaPredSafe.log());
         NDArray loss = kl.mul(isT0.neg().add(1)).add(reconLoss.mul(isT0));
 
+        // Clip per-pixel loss to prevent extreme values
+        loss = loss.clip(-1e6, 1e6);
+
         // Sum over pixels, mean over batch (chain sum for PyTorch compatibility)
-        return loss.sum(new int[]{3}).sum(new int[]{2}).sum(new int[]{1}).mean();
+        NDArray result = loss.sum(new int[]{3}).sum(new int[]{2}).sum(new int[]{1}).mean();
+        return result;
     }
 
     private NDArray computePosteriorMean(NDArray x0, NDArray xt, int[] timesteps, NDManager manager) {

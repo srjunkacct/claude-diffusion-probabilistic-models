@@ -5,6 +5,7 @@ import ai.djl.Model;
 import ai.djl.ndarray.NDArray;
 import ai.djl.ndarray.NDList;
 import ai.djl.ndarray.NDManager;
+import ai.djl.ndarray.types.DataType;
 import ai.djl.ndarray.types.Shape;
 import ai.djl.training.GradientCollector;
 import ai.djl.training.ParameterStore;
@@ -22,6 +23,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
+import java.util.ArrayList;
 
 /**
  * Training loop for the diffusion model.
@@ -86,7 +89,7 @@ public class Trainer {
         // Initialize model parameters
         Shape inputShape = new Shape(config.getBatchSize(), config.getImageChannels(),
                 config.getImageHeight(), config.getImageWidth());
-        model.prepare(new Shape[]{inputShape});
+        model.initialize(manager, DataType.FLOAT32, inputShape);
         model.initializeDiffusionParams(manager);
 
         // Initialize sampler
@@ -131,19 +134,29 @@ public class Trainer {
     private void trainEpoch() throws Exception {
         runningLoss = 0.0;
         lossCount = 0;
-
+        int index = 0;
         for (Batch batch : trainLoader.iterateBatches(manager)) {
-            try {
-                NDArray images = trainLoader.preprocessBatch(batch);
-                float loss = trainStep(images);
+            try (NDManager stepManager = manager.newSubManager()) {
+                // Get raw images and duplicate into stepManager (stays on GPU)
+                NDArray rawImages = batch.getData().singletonOrThrow();
+                NDArray imagesCopy = rawImages.duplicate();
+                imagesCopy.attach(stepManager);
 
-                runningLoss += loss;
-                lossCount++;
+                // Preprocess using the copy (intermediates will be on stepManager)
+                NDArray images = trainLoader.getPreprocessor().preprocess(imagesCopy);
+
+                float loss = trainStep(images, stepManager);
+
+                // Skip NaN losses (bad batches)
+                if (!Float.isNaN(loss)) {
+                    runningLoss += loss;
+                    lossCount++;
+                }
                 globalStep++;
 
                 if (globalStep % config.getLogEveryNSteps() == 0) {
                     double avgLoss = runningLoss / lossCount;
-                    logger.info("Epoch {} Step {} - Loss: {:.4f}", currentEpoch, globalStep, avgLoss);
+                    logger.info("{} Epoch {} Step {} - Loss: {}", Instant.now().toString(), currentEpoch, globalStep, String.format("%.4f", avgLoss));
                     runningLoss = 0.0;
                     lossCount = 0;
                 }
@@ -153,26 +166,38 @@ public class Trainer {
         }
 
         double epochLoss = lossCount > 0 ? runningLoss / lossCount : 0;
-        logger.info("Epoch {} completed - Average Loss: {:.4f}", currentEpoch, epochLoss);
+        logger.info("Epoch {} completed - Average Loss: {}", currentEpoch, String.format("%.4f", epochLoss));
+        logger.info(Instant.now().toString());
+
+        // Force garbage collection to free native memory
+        System.gc();
     }
 
     /**
      * Perform a single training step.
      *
      * @param images Batch of preprocessed images
+     * @param stepManager Sub-manager for this step's memory
      * @return Loss value
      */
-    private float trainStep(NDArray images) {
+    private float trainStep(NDArray images, NDManager stepManager) {
         float lossValue;
 
-        try (GradientCollector gc = manager.getEngine().newGradientCollector()) {
+        try (GradientCollector gc = stepManager.getEngine().newGradientCollector()) {
             // Forward pass
             NDList output = model.forward(parameterStore, new NDList(images), true);
             NDArray loss = output.singletonOrThrow();
 
+            lossValue = loss.getFloat();
+
+            // Skip backward pass if loss is NaN, Inf, or extremely large
+            if (Float.isNaN(lossValue) || Float.isInfinite(lossValue) || lossValue > 1e10) {
+                logger.warn("Skipping batch due to extreme loss value: {}", lossValue);
+                return Float.NaN;  // Signal to skip this batch
+            }
+
             // Backward pass
             gc.backward(loss);
-            lossValue = loss.getFloat();
         }
 
         // Apply gradients with RMSprop
@@ -183,44 +208,69 @@ public class Trainer {
     }
 
     /**
-     * Apply RMSprop optimization.
+     * Apply RMSprop optimization using GPU tensors with proper memory management.
      */
     private void applyRMSprop(double learningRate) {
         double decay = config.getRmspropDecay();
         double epsilon = config.getRmspropEpsilon();
         double clipNorm = config.getGradientClipNorm();
 
-        for (var pair : model.getParameters()) {
-            String name = pair.getKey();
-            var param = pair.getValue();
+        try (NDManager optimManager = manager.newSubManager()) {
+            for (var pair : model.getParameters()) {
+                String name = pair.getKey();
+                var param = pair.getValue();
 
-            if (param.requiresGradient()) {
-                NDArray gradient = param.getArray().getGradient();
+                if (param.requiresGradient()) {
+                    NDArray gradientOrig = param.getArray().getGradient();
 
-                if (gradient == null) {
-                    continue;
-                }
-
-                // Gradient clipping
-                if (clipNorm > 0) {
-                    float gradNorm = gradient.norm().getFloat();
-                    if (gradNorm > clipNorm) {
-                        gradient = gradient.mul(clipNorm / gradNorm);
+                    if (gradientOrig == null) {
+                        continue;
                     }
-                }
 
-                // RMSprop update
-                NDArray sqGradAvg = squaredGradAvg.get(name);
-                if (sqGradAvg == null) {
-                    sqGradAvg = gradient.pow(2).mul(1 - decay);
-                    squaredGradAvg.put(name, sqGradAvg);
-                } else {
-                    sqGradAvg = sqGradAvg.mul(decay).add(gradient.pow(2).mul(1 - decay));
-                    squaredGradAvg.put(name, sqGradAvg);
-                }
+                    // Duplicate gradient into optimManager for safe operations
+                    NDArray gradient = gradientOrig.duplicate();
+                    gradient.attach(optimManager);
 
-                NDArray update = gradient.div(sqGradAvg.sqrt().add(epsilon)).mul(learningRate);
-                param.getArray().subi(update);
+                    // Skip if gradient contains NaN or Inf
+                    float gradMax = gradient.abs().max().getFloat();
+                    if (Float.isNaN(gradMax) || Float.isInfinite(gradMax)) {
+                        continue;
+                    }
+
+                    // Gradient clipping (in-place)
+                    if (clipNorm > 0) {
+                        float gradNorm = gradient.norm().getFloat();
+                        if (gradNorm > clipNorm) {
+                            gradient.muli(clipNorm / gradNorm);
+                        }
+                    }
+
+                    // Compute grad^2 in optimManager
+                    NDArray gradSquared = gradient.square();
+
+                    // RMSprop update
+                    NDArray sqGradAvg = squaredGradAvg.get(name);
+
+                    if (sqGradAvg == null) {
+                        // First time: initialize squared gradient average on main manager
+                        sqGradAvg = gradSquared.mul(1 - decay);
+                        sqGradAvg.attach(manager);
+                        squaredGradAvg.put(name, sqGradAvg);
+                    } else {
+                        // Update in-place: sqGradAvg = decay * sqGradAvg + (1-decay) * grad^2
+                        sqGradAvg.muli(decay).addi(gradSquared.mul(1 - decay));
+                    }
+
+                    // Compute sqrt in optimManager to avoid memory leak
+                    NDArray sqrtAvg = sqGradAvg.sqrt();
+                    sqrtAvg.attach(optimManager);
+
+                    // Compute update: lr * gradient / (sqrt(sqGradAvg) + epsilon)
+                    NDArray update = gradient.div(sqrtAvg.add(epsilon)).mul(learningRate);
+
+                    // Apply update in-place to parameter
+                    param.getArray().subi(update);
+                }
             }
         }
     }

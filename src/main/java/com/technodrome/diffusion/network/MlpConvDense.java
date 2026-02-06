@@ -6,12 +6,16 @@ import ai.djl.ndarray.NDManager;
 import ai.djl.ndarray.types.DataType;
 import ai.djl.ndarray.types.Shape;
 import ai.djl.nn.AbstractBlock;
-import ai.djl.nn.Parameter;
+import ai.djl.nn.convolutional.Conv2d;
 import ai.djl.training.ParameterStore;
+import ai.djl.training.initializer.XavierInitializer;
 import ai.djl.util.PairList;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * Main MLP architecture for the diffusion model.
+ * Main MLP architecture for the diffusion model using DJL's built-in Conv2d.
  *
  * Architecture consists of two parts:
  * 1. Lower MLP: Convolutional layers for feature extraction
@@ -35,17 +39,10 @@ public class MlpConvDense extends AbstractBlock {
     private final float leakySlope;
 
     // Network components
-    private MultiLayerConvolution lowerMlp;
-
-    // Upper MLP parameters (1x1 convolutions)
-    private final java.util.List<Parameter> upperWeights;
-    private final java.util.List<Parameter> upperBiases;
-
-    // Output layer parameters
-    private Parameter muWeight;
-    private Parameter muBias;
-    private Parameter sigmaWeight;
-    private Parameter sigmaBias;
+    private final MultiLayerConvolution lowerMlp;
+    private final List<Conv2d> upperConvLayers;
+    private final Conv2d muConv;
+    private final Conv2d sigmaConv;
 
     /**
      * Create the main MLP network.
@@ -78,53 +75,46 @@ public class MlpConvDense extends AbstractBlock {
         this.lowerMlp = new MultiLayerConvolution(
                 inputChannels,
                 lowerHiddenChannels,
-                lowerHiddenChannels,  // Output same as hidden for lower
+                lowerHiddenChannels,
                 numLowerLayers,
                 numScales,
                 kernelSize,
                 leakySlope);
         addChildBlock("lower_mlp", lowerMlp);
 
-        // Create upper MLP parameters (1x1 convolutions = per-pixel dense)
-        this.upperWeights = new java.util.ArrayList<>();
-        this.upperBiases = new java.util.ArrayList<>();
+        // Create upper MLP using 1x1 Conv2d blocks with Xavier initialization
+        XavierInitializer xavier = new XavierInitializer(XavierInitializer.RandomType.GAUSSIAN, XavierInitializer.FactorType.IN, 2.0f);
 
+        this.upperConvLayers = new ArrayList<>();
         for (int i = 0; i < numUpperLayers; i++) {
-            Parameter weight = addParameter(
-                    Parameter.builder()
-                            .setName("upper_weight" + i)
-                            .setType(Parameter.Type.WEIGHT)
-                            .build());
-            Parameter bias = addParameter(
-                    Parameter.builder()
-                            .setName("upper_bias" + i)
-                            .setType(Parameter.Type.BIAS)
-                            .build());
-            upperWeights.add(weight);
-            upperBiases.add(bias);
+            Conv2d conv = Conv2d.builder()
+                    .setFilters(upperHiddenChannels)
+                    .setKernelShape(new Shape(1, 1))
+                    .optBias(true)
+                    .build();
+            conv.setInitializer(xavier, ai.djl.nn.Parameter.Type.WEIGHT);
+            upperConvLayers.add(conv);
+            addChildBlock("upper_conv" + i, conv);
         }
 
         // Output layers for mu and sigma coefficients
-        this.muWeight = addParameter(
-                Parameter.builder()
-                        .setName("mu_weight")
-                        .setType(Parameter.Type.WEIGHT)
-                        .build());
-        this.muBias = addParameter(
-                Parameter.builder()
-                        .setName("mu_bias")
-                        .setType(Parameter.Type.BIAS)
-                        .build());
-        this.sigmaWeight = addParameter(
-                Parameter.builder()
-                        .setName("sigma_weight")
-                        .setType(Parameter.Type.WEIGHT)
-                        .build());
-        this.sigmaBias = addParameter(
-                Parameter.builder()
-                        .setName("sigma_bias")
-                        .setType(Parameter.Type.BIAS)
-                        .build());
+        int outputChannels = inputChannels * numTemporalBasis;
+
+        this.muConv = Conv2d.builder()
+                .setFilters(outputChannels)
+                .setKernelShape(new Shape(1, 1))
+                .optBias(true)
+                .build();
+        muConv.setInitializer(xavier, ai.djl.nn.Parameter.Type.WEIGHT);
+        addChildBlock("mu_conv", muConv);
+
+        this.sigmaConv = Conv2d.builder()
+                .setFilters(outputChannels)
+                .setKernelShape(new Shape(1, 1))
+                .optBias(true)
+                .build();
+        sigmaConv.setInitializer(xavier, ai.djl.nn.Parameter.Type.WEIGHT);
+        addChildBlock("sigma_conv", sigmaConv);
     }
 
     /**
@@ -144,40 +134,30 @@ public class MlpConvDense extends AbstractBlock {
     }
 
     @Override
-    public void prepare(Shape[] inputShapes) {
+    public void initializeChildBlocks(NDManager manager, DataType dataType, Shape... inputShapes) {
         Shape inputShape = inputShapes[0];
+        long batch = inputShape.get(0);
         long height = inputShape.get(2);
         long width = inputShape.get(3);
 
-        // Prepare lower MLP
-        lowerMlp.prepare(inputShapes);
+        // Initialize lower MLP
+        lowerMlp.initialize(manager, dataType, inputShape);
 
-        // Upper MLP dimensions
-        // Note: lowerMlp output channels = (lowerHiddenChannels / numScales) * numScales due to integer division
+        // Get lower MLP output channels
         int lowerOutputChannels = (lowerHiddenChannels / numScales) * numScales;
-        int prevChannels = lowerOutputChannels;
 
+        // Initialize upper conv layers
+        int prevChannels = lowerOutputChannels;
         for (int i = 0; i < numUpperLayers; i++) {
-            int currOutputChannels = upperHiddenChannels;
-            upperWeights.get(i).setShape(new Shape(currOutputChannels, prevChannels, 1, 1));
-            upperBiases.get(i).setShape(new Shape(currOutputChannels));
-            prevChannels = currOutputChannels;
+            Shape layerInputShape = new Shape(batch, prevChannels, height, width);
+            upperConvLayers.get(i).initialize(manager, dataType, layerInputShape);
+            prevChannels = upperHiddenChannels;
         }
 
-        // Output layer dimensions
-        // Output: numTemporalBasis coefficients per channel for both mu and sigma
-        int muOutputChannels = inputChannels * numTemporalBasis;
-        int sigmaOutputChannels = inputChannels * numTemporalBasis;
-
-        muWeight.setShape(new Shape(muOutputChannels, prevChannels, 1, 1));
-        muBias.setShape(new Shape(muOutputChannels));
-        sigmaWeight.setShape(new Shape(sigmaOutputChannels, prevChannels, 1, 1));
-        sigmaBias.setShape(new Shape(sigmaOutputChannels));
-    }
-
-    @Override
-    public void initializeChildBlocks(NDManager manager, DataType dataType, Shape... inputShapes) {
-        lowerMlp.initialize(manager, dataType, inputShapes);
+        // Initialize output layers
+        Shape outputInputShape = new Shape(batch, prevChannels, height, width);
+        muConv.initialize(manager, dataType, outputInputShape);
+        sigmaConv.initialize(manager, dataType, outputInputShape);
     }
 
     @Override
@@ -188,7 +168,6 @@ public class MlpConvDense extends AbstractBlock {
             PairList<String, Object> params) {
 
         NDArray x = inputs.singletonOrThrow();
-        NDManager manager = x.getManager();
         Shape inputShape = x.getShape();
         long batch = inputShape.get(0);
         long height = inputShape.get(2);
@@ -200,59 +179,23 @@ public class MlpConvDense extends AbstractBlock {
 
         // Apply upper MLP (1x1 convolutions = per-pixel dense layers)
         for (int i = 0; i < numUpperLayers; i++) {
-            NDArray weight = parameterStore.getValue(upperWeights.get(i), x.getDevice(), training);
-            NDArray bias = parameterStore.getValue(upperBiases.get(i), x.getDevice(), training);
-
-            features = conv1x1(features, weight, bias);
+            NDList convOutput = upperConvLayers.get(i).forward(parameterStore, new NDList(features), training);
+            features = convOutput.singletonOrThrow();
             features = LeakyRelu.apply(features, leakySlope);
         }
 
         // Output layers for mu and sigma
-        NDArray muWeightVal = parameterStore.getValue(muWeight, x.getDevice(), training);
-        NDArray muBiasVal = parameterStore.getValue(muBias, x.getDevice(), training);
-        NDArray muCoeffs = conv1x1(features, muWeightVal, muBiasVal);
+        NDList muOutput = muConv.forward(parameterStore, new NDList(features), training);
+        NDArray muCoeffs = muOutput.singletonOrThrow();
 
-        NDArray sigmaWeightVal = parameterStore.getValue(sigmaWeight, x.getDevice(), training);
-        NDArray sigmaBiasVal = parameterStore.getValue(sigmaBias, x.getDevice(), training);
-        NDArray sigmaCoeffs = conv1x1(features, sigmaWeightVal, sigmaBiasVal);
+        NDList sigmaOutput = sigmaConv.forward(parameterStore, new NDList(features), training);
+        NDArray sigmaCoeffs = sigmaOutput.singletonOrThrow();
 
         // Reshape to (batch, numTemporalBasis, inputChannels, height, width)
         muCoeffs = muCoeffs.reshape(batch, numTemporalBasis, inputChannels, height, width);
         sigmaCoeffs = sigmaCoeffs.reshape(batch, numTemporalBasis, inputChannels, height, width);
 
         return new NDList(muCoeffs, sigmaCoeffs);
-    }
-
-    private NDArray conv1x1(NDArray input, NDArray weight, NDArray bias) {
-        // 1x1 convolution (per-pixel linear transformation)
-        // Implemented as matrix multiplication across spatial dimensions
-        Shape inputShape = input.getShape();
-        long batch = inputShape.get(0);
-        long inChannels = inputShape.get(1);
-        long height = inputShape.get(2);
-        long width = inputShape.get(3);
-
-        Shape weightShape = weight.getShape();
-        long outChannels = weightShape.get(0);
-
-        // Reshape input to (batch, inChannels, H*W)
-        NDArray flatInput = input.reshape(batch, inChannels, height * width);
-
-        // Weight is (outChannels, inChannels, 1, 1) -> (outChannels, inChannels)
-        NDArray flatWeight = weight.reshape(outChannels, inChannels);
-
-        // Compute: output = weight @ input for each batch and spatial position
-        // flatInput: (batch, inChannels, H*W)
-        // flatWeight: (outChannels, inChannels)
-        // We need: (batch, outChannels, H*W) = flatWeight @ flatInput
-
-        NDArray output = flatWeight.matMul(flatInput);  // (outChannels, H*W) for each batch element
-        output = output.reshape(batch, outChannels, height, width);
-
-        // Add bias
-        output = output.add(bias.reshape(1, outChannels, 1, 1));
-
-        return output;
     }
 
     @Override

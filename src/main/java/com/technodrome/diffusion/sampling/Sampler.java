@@ -64,7 +64,18 @@ public class Sampler {
 
         // Run reverse diffusion from T to 0
         for (int t = trajectoryLength - 1; t >= 0; t--) {
-            x = diffusionStep(x, t, parameterStore, null, null);
+            try (NDManager stepManager = manager.newSubManager()) {
+                // Attach current x to step manager for intermediate computations
+                NDArray xStep = x.duplicate();
+                xStep.attach(stepManager);
+
+                NDArray xNext = diffusionStepManaged(xStep, t, parameterStore, null, null, stepManager);
+
+                // Copy result back to main manager before stepManager closes
+                x.close();
+                x = xNext.duplicate();
+                x.attach(manager);
+            }
 
             if (t % 100 == 0) {
                 logger.debug("Sampling step {}/{}", trajectoryLength - t, trajectoryLength);
@@ -84,7 +95,16 @@ public class Sampler {
         NDArray x = manager.randomNormal(sampleShape);
 
         for (int t = trajectoryLength - 1; t >= 0; t--) {
-            x = diffusionStep(x, t, parameterStore, null, null);
+            try (NDManager stepManager = manager.newSubManager()) {
+                NDArray xStep = x.duplicate();
+                xStep.attach(stepManager);
+
+                NDArray xNext = diffusionStepManaged(xStep, t, parameterStore, null, null, stepManager);
+
+                x.close();
+                x = xNext.duplicate();
+                x.attach(manager);
+            }
 
             if (callback != null) {
                 callback.onStep(t, trajectoryLength, x);
@@ -115,7 +135,20 @@ public class Sampler {
 
         // Run reverse diffusion with masking at each step
         for (int t = trajectoryLength - 1; t >= 0; t--) {
-            x = diffusionStep(x, t, parameterStore, originalImage, mask);
+            try (NDManager stepManager = manager.newSubManager()) {
+                NDArray xStep = x.duplicate();
+                xStep.attach(stepManager);
+
+                NDArray xNext = diffusionStepManaged(xStep, t, parameterStore, originalImage, mask, stepManager);
+
+                x.close();
+                x = xNext.duplicate();
+                x.attach(manager);
+            }
+
+            if (t % 100 == 0) {
+                logger.debug("Inpainting step {}/{}", trajectoryLength - t, trajectoryLength);
+            }
         }
 
         logger.info("Inpainting complete");
@@ -134,11 +167,25 @@ public class Sampler {
                            ParameterStore parameterStore) {
         logger.info("Denoising from timestep {}...", startTimestep);
 
-        NDArray x = noisyImage;
+        NDArray x = noisyImage.duplicate();
+        x.attach(manager);
 
         // Run reverse diffusion from startTimestep to 0
         for (int t = startTimestep; t >= 0; t--) {
-            x = diffusionStep(x, t, parameterStore, null, null);
+            try (NDManager stepManager = manager.newSubManager()) {
+                NDArray xStep = x.duplicate();
+                xStep.attach(stepManager);
+
+                NDArray xNext = diffusionStepManaged(xStep, t, parameterStore, null, null, stepManager);
+
+                x.close();
+                x = xNext.duplicate();
+                x.attach(manager);
+            }
+
+            if (t % 100 == 0) {
+                logger.debug("Denoising step {}/{}", startTimestep - t + 1, startTimestep + 1);
+            }
         }
 
         logger.info("Denoising complete");
@@ -146,7 +193,15 @@ public class Sampler {
     }
 
     /**
-     * Perform a single reverse diffusion step.
+     * Perform a single reverse diffusion step (legacy, uses main manager).
+     */
+    private NDArray diffusionStep(NDArray xt, int t, ParameterStore parameterStore,
+                                   NDArray originalImage, NDArray mask) {
+        return diffusionStepManaged(xt, t, parameterStore, originalImage, mask, manager);
+    }
+
+    /**
+     * Perform a single reverse diffusion step with explicit manager.
      *
      * p(x_{t-1} | x_t) = N(mu_theta(x_t, t), sigma_theta(x_t, t))
      *
@@ -155,16 +210,17 @@ public class Sampler {
      * @param parameterStore Parameter store
      * @param originalImage Optional original image for inpainting
      * @param mask Optional mask for inpainting
+     * @param stepManager Manager for this step's tensors
      * @return Sample at time t-1
      */
-    private NDArray diffusionStep(NDArray xt, int t, ParameterStore parameterStore,
-                                   NDArray originalImage, NDArray mask) {
+    private NDArray diffusionStepManaged(NDArray xt, int t, ParameterStore parameterStore,
+                                          NDArray originalImage, NDArray mask, NDManager stepManager) {
         long batchSize = xt.getShape().get(0);
 
         // Create timestep array
         int[] timesteps = new int[(int) batchSize];
         java.util.Arrays.fill(timesteps, t);
-        NDArray tArray = manager.create(timesteps);
+        NDArray tArray = stepManager.create(timesteps);
 
         // Get mu and sigma from model
         NDList muSigma = model.getMuSigma(xt, tArray, parameterStore, false);
@@ -172,7 +228,7 @@ public class Sampler {
         NDArray sigma = muSigma.get(1);
 
         // Sample x_{t-1} from N(mu, sigma^2)
-        NDArray noise = manager.randomNormal(xt.getShape());
+        NDArray noise = stepManager.randomNormal(xt.getShape());
         NDArray xPrev;
 
         if (t > 0) {
@@ -220,19 +276,34 @@ public class Sampler {
 
         Shape sampleShape = new Shape(numSamples, imageChannels, imageHeight, imageWidth);
         NDArray x = manager.randomNormal(sampleShape);
-        intermediates[intermediateIdx++] = x.duplicate();
+        NDArray initialCopy = x.duplicate();
+        initialCopy.attach(manager);
+        intermediates[intermediateIdx++] = initialCopy;
 
         for (int t = trajectoryLength - 1; t >= 0; t--) {
-            x = diffusionStep(x, t, parameterStore, null, null);
+            try (NDManager stepManager = manager.newSubManager()) {
+                NDArray xStep = x.duplicate();
+                xStep.attach(stepManager);
+
+                NDArray xNext = diffusionStepManaged(xStep, t, parameterStore, null, null, stepManager);
+
+                x.close();
+                x = xNext.duplicate();
+                x.attach(manager);
+            }
 
             if ((trajectoryLength - 1 - t) % stepInterval == 0 && intermediateIdx < intermediates.length) {
-                intermediates[intermediateIdx++] = x.duplicate();
+                NDArray intermediateCopy = x.duplicate();
+                intermediateCopy.attach(manager);
+                intermediates[intermediateIdx++] = intermediateCopy;
             }
         }
 
         // Ensure final sample is included
         if (intermediateIdx < intermediates.length) {
-            intermediates[intermediateIdx] = x.duplicate();
+            NDArray finalCopy = x.duplicate();
+            finalCopy.attach(manager);
+            intermediates[intermediateIdx] = finalCopy;
         }
 
         return intermediates;
@@ -250,6 +321,8 @@ public class Sampler {
      */
     public NDArray interpolate(NDArray image1, NDArray image2, int numSteps,
                                int noiseLevel, ParameterStore parameterStore) {
+        logger.info("Interpolating between images with {} steps...", numSteps);
+
         // Add noise to both images at the same level
         NDArray t = manager.create(new int[]{noiseLevel});
         NDList forward1 = model.getForwardDiffusionSample(image1, t, null);
@@ -260,17 +333,34 @@ public class Sampler {
         // Interpolate in noisy space
         NDArray[] interpolated = new NDArray[numSteps];
         for (int i = 0; i < numSteps; i++) {
-            float alpha = (float) i / (numSteps - 1);
-            NDArray blended = noisy1.mul(1 - alpha).add(noisy2.mul(alpha));
-            interpolated[i] = denoise(blended, noiseLevel, parameterStore);
+            try (NDManager blendManager = manager.newSubManager()) {
+                float alpha = (float) i / (numSteps - 1);
+                NDArray blended = noisy1.mul(1 - alpha).add(noisy2.mul(alpha));
+                blended.attach(blendManager);
+
+                NDArray denoised = denoise(blended, noiseLevel, parameterStore);
+                // denoise returns array attached to manager, keep it there
+                interpolated[i] = denoised;
+            }
+            logger.debug("Interpolation step {}/{}", i + 1, numSteps);
         }
 
         // Stack along batch dimension
-        NDArray result = interpolated[0];
+        NDArray result = interpolated[0].duplicate();
+        result.attach(manager);
         for (int i = 1; i < numSteps; i++) {
-            result = result.concat(interpolated[i], 0);
+            try (NDManager concatManager = manager.newSubManager()) {
+                NDArray oldResult = result;
+                result = oldResult.concat(interpolated[i], 0);
+                result.attach(manager);
+                oldResult.close();
+            }
+            // Clean up the interpolated array as we go
+            interpolated[i].close();
         }
+        interpolated[0].close();
 
+        logger.info("Interpolation complete");
         return result;
     }
 

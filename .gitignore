@@ -65,3 +65,7 @@ secrets.toml
 
 #Claude
 .claude/
+
+checkpoints/
+samples/
+*.png

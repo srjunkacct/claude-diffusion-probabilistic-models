@@ -3,6 +3,7 @@ package com.technodrome.diffusion;
 import ai.djl.Model;
 import ai.djl.ndarray.NDArray;
 import ai.djl.ndarray.NDManager;
+import ai.djl.ndarray.types.DataType;
 import ai.djl.ndarray.types.Shape;
 import ai.djl.training.ParameterStore;
 
@@ -165,7 +166,8 @@ public class DiffusionApp {
             }
         }
 
-        try (NDManager manager = NDManager.newBaseManager()) {
+        try (NDManager manager = NDManager.newBaseManager();
+             Model djlModel = Model.newInstance("diffusion")) {
             // Create model
             TrainingConfig config = TrainingConfig.createMnistDefault();
             DiffusionModel model = DiffusionModel.createMnistModel(
@@ -174,15 +176,13 @@ public class DiffusionApp {
 
             // Initialize model
             Shape inputShape = new Shape(numSamples, 1, 28, 28);
-            model.prepare(new Shape[]{inputShape});
+            model.initialize(manager, DataType.FLOAT32, inputShape);
             model.initializeDiffusionParams(manager);
 
             // Load checkpoint if provided
             if (modelPath != null) {
-                try (Model djlModel = Model.newInstance("diffusion")) {
-                    djlModel.setBlock(model);
-                    djlModel.load(Paths.get(modelPath), "diffusion_model");
-                }
+                djlModel.setBlock(model);
+                djlModel.load(Paths.get(modelPath), "diffusion_model");
                 logger.info("Loaded model from {}", modelPath);
             } else {
                 logger.warn("No model checkpoint provided, using random initialization");
@@ -232,7 +232,8 @@ public class DiffusionApp {
             }
         }
 
-        try (NDManager manager = NDManager.newBaseManager()) {
+        try (NDManager manager = NDManager.newBaseManager();
+             Model djlModel = Model.newInstance("diffusion")) {
             // Setup model
             TrainingConfig config = TrainingConfig.createMnistDefault();
             DiffusionModel model = DiffusionModel.createMnistModel(
@@ -240,14 +241,13 @@ public class DiffusionApp {
                     config.getNumTemporalBasis());
 
             Shape inputShape = new Shape(numSamples, 1, 28, 28);
-            model.prepare(new Shape[]{inputShape});
+            model.initialize(manager, DataType.FLOAT32, inputShape);
             model.initializeDiffusionParams(manager);
 
             if (modelPath != null) {
-                try (Model djlModel = Model.newInstance("diffusion")) {
-                    djlModel.setBlock(model);
-                    djlModel.load(Paths.get(modelPath), "diffusion_model");
-                }
+                djlModel.setBlock(model);
+                djlModel.load(Paths.get(modelPath), "diffusion_model");
+                logger.info("Loaded model from {}", modelPath);
             }
 
             // Load some test images
@@ -314,7 +314,8 @@ public class DiffusionApp {
             }
         }
 
-        try (NDManager manager = NDManager.newBaseManager()) {
+        try (NDManager manager = NDManager.newBaseManager();
+             Model djlModel = Model.newInstance("diffusion")) {
             // Setup model
             TrainingConfig config = TrainingConfig.createMnistDefault();
             DiffusionModel model = DiffusionModel.createMnistModel(
@@ -322,14 +323,13 @@ public class DiffusionApp {
                     config.getNumTemporalBasis());
 
             Shape inputShape = new Shape(numSamples, 1, 28, 28);
-            model.prepare(new Shape[]{inputShape});
+            model.initialize(manager, DataType.FLOAT32, inputShape);
             model.initializeDiffusionParams(manager);
 
             if (modelPath != null) {
-                try (Model djlModel = Model.newInstance("diffusion")) {
-                    djlModel.setBlock(model);
-                    djlModel.load(Paths.get(modelPath), "diffusion_model");
-                }
+                djlModel.setBlock(model);
+                djlModel.load(Paths.get(modelPath), "diffusion_model");
+                logger.info("Loaded model from {}", modelPath);
             }
 
             // Load test images
@@ -378,7 +378,7 @@ public class DiffusionApp {
 
             // Initialize
             Shape inputShape = new Shape(config.getBatchSize(), 1, 28, 28);
-            model.prepare(new Shape[]{inputShape});
+            model.initialize(manager, DataType.FLOAT32, inputShape);
             model.initializeDiffusionParams(manager);
 
             logger.info("Model initialized successfully");

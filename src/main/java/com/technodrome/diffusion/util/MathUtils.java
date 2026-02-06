@@ -36,17 +36,18 @@ public final class MathUtils {
 
     /**
      * Softplus function: log(1 + exp(x))
-     * Uses a numerically stable implementation.
+     * Uses a numerically stable implementation that avoids overflow.
      */
     public static NDArray softplus(NDArray x) {
-        // For large x, softplus(x) ≈ x
-        // For small x, use log(1 + exp(x))
-        NDArray expX = x.exp();
-        NDArray result = expX.add(1.0).log();
-        // Where x is large, just use x directly
-        NDArray mask = x.gt(SOFTPLUS_THRESHOLD);
-        return result.mul(mask.logicalNot().toType(result.getDataType(), false))
-                .add(x.mul(mask.toType(x.getDataType(), false)));
+        // Numerically stable: softplus(x) = max(0, x) + log(1 + exp(-|x|))
+        // This avoids overflow from exp(large_positive)
+        NDArray absX = x.abs();
+        NDArray negAbsX = absX.neg();
+        // log(1 + exp(-|x|)) is always safe since exp(-|x|) <= 1
+        NDArray logTerm = negAbsX.exp().add(1.0).log();
+        // max(0, x) + log(1 + exp(-|x|))
+        NDArray result = x.maximum(0).add(logTerm);
+        return result;
     }
 
     /**

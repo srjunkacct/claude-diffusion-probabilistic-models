@@ -27,7 +27,7 @@ public class TrainingConfig {
 
     // Optimization
     private int batchSize = 512;
-    private double learningRate = 1e-3;
+    private double learningRate = 1e-4;  // Reduced for stability
     private double learningRateDecayFactor = 0.1;
     private int learningRateDecayEpochs = 1000;
     private double rmspropDecay = 0.9;
