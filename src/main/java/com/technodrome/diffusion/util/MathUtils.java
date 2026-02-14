@@ -86,12 +86,15 @@ public final class MathUtils {
     /**
      * KL divergence between two Gaussians.
      * KL(N(mu1, sigma1) || N(mu2, sigma2))
+     *
      */
     public static NDArray gaussianKL(NDArray mu1, NDArray sigma1, NDArray mu2, NDArray sigma2) {
         NDArray logRatio = sigma2.log().sub(sigma1.log());
-        NDArray varianceRatio = sigma1.pow(2).div(sigma2.pow(2));
-        NDArray muDiff = mu1.sub(mu2).pow(2).div(sigma2.pow(2));
-        return logRatio.add(varianceRatio.add(muDiff).sub(1.0).mul(0.5));
+        return logRatio
+                .add( sigma1.pow(2).add( mu1.sub(mu2).pow(2) ).div( sigma2.pow(2).mul(2 ) ) )
+                                .sub(0.5 );
+
+        // return logRatio.add(varianceRatio.add(muDiff).sub(1.0).mul(0.5));
     }
 
     /**

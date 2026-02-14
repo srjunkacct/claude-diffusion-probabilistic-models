@@ -238,7 +238,7 @@ public class DiffusionModel extends AbstractBlock {
         NDArray muPred = muSigma.get(0);
         NDArray sigmaPred = muSigma.get(1);
 
-        // Compute the true posterior mean
+        // Compute the true posterior mean from the forward process
         // mu_q = (sqrt(alpha_bar_{t-1}) * beta_t * x_0 + sqrt(alpha_t) * (1 - alpha_bar_{t-1}) * x_t) / (1 - alpha_bar_t)
         int[] timesteps = t.toIntArray();
         NDArray muTrue = computePosteriorMean(x0, xt, timesteps, manager);
