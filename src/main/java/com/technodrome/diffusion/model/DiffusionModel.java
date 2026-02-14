@@ -12,6 +12,9 @@ import ai.djl.util.PairList;
 import com.technodrome.diffusion.network.MlpConvDense;
 import com.technodrome.diffusion.util.MathUtils;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * Core diffusion probabilistic model.
  *
@@ -22,8 +25,12 @@ import com.technodrome.diffusion.util.MathUtils;
  */
 public class DiffusionModel extends AbstractBlock {
 
+    private static final Logger logger = LoggerFactory.getLogger(DiffusionModel.class);
     private static final byte VERSION = 1;
-    private static final double MIN_SIGMA = 1e-4;  // Increased for numerical stability
+    // Minimum sigma to prevent division explosion in KL divergence
+    // With sigma=0.01, sigma^2=1e-4, so muDiff=1.0 gives muDiff^2/sigma^2 = 1e4
+    // which is still large but manageable. Smaller values cause training instability.
+    private static final double MIN_SIGMA = 0.01;
 
     private final int trajectoryLength;
     private final int numTemporalBasis;
@@ -165,19 +172,38 @@ public class DiffusionModel extends AbstractBlock {
 
         // Get network predictions
         NDList networkOutput = network.forward(parameterStore, new NDList(xt), training);
-        NDArray muCoeffs = networkOutput.get(0);     // (batch, numTemporalBasis, channels, height, width)
-        NDArray sigmaCoeffs = networkOutput.get(1);  // (batch, numTemporalBasis, channels, height, width)
+        NDArray muCoeffs = networkOutput.get(0);      // (batch, numTemporalBasis, channels, height, width)
+        NDArray betaCoeffs = networkOutput.get(1);    // (batch, numTemporalBasis, channels, height, width)
 
         // Apply temporal basis to get time-specific predictions
         // Reshape basis for broadcasting: (batch, numTemporalBasis, 1, 1, 1)
         NDArray basisExpanded = basis.reshape(basis.getShape().get(0), numTemporalBasis, 1, 1, 1);
 
         // Weighted sum over temporal basis dimension
-        NDArray mu = muCoeffs.mul(basisExpanded).sum(new int[]{1});  // (batch, channels, height, width)
-        NDArray sigmaRaw = sigmaCoeffs.mul(basisExpanded).sum(new int[]{1});
+        NDArray muCoeff = muCoeffs.mul(basisExpanded).sum(new int[]{1});    // (batch, channels, height, width)
+        NDArray betaCoeff = betaCoeffs.mul(basisExpanded).sum(new int[]{1});
 
-        // Apply softplus to sigma to ensure positivity, add minimum for stability
-        NDArray sigma = MathUtils.softplus(sigmaRaw).add(MIN_SIGMA);
+        // Get forward beta at each timestep
+        float[] betaData = betas.toFloatArray();
+        float[] betaForwardData = new float[timesteps.length];
+        for (int i = 0; i < timesteps.length; i++) {
+            int idx = Math.min(timesteps[i], trajectoryLength - 1);
+            betaForwardData[i] = betaData[idx];
+        }
+        NDArray betaForward = manager.create(betaForwardData).reshape(-1, 1, 1, 1);
+
+        // Reverse variance is perturbation around forward variance
+        // beta_coeff_scaled = beta_coeff / sqrt(trajectory_length)
+        NDArray betaCoeffScaled = betaCoeff.div(Math.sqrt(trajectoryLength));
+        // beta_reverse = sigmoid(beta_coeff_scaled + logit(beta_forward))
+        NDArray betaReverse = MathUtils.sigmoid(betaCoeffScaled.add(MathUtils.logit(betaForward)));
+
+        // Reverse mean is perturbation around forward process mean
+        // mu = x_t * sqrt(1 - beta_forward) + mu_coeff * sqrt(beta_forward)
+        NDArray mu = xt.mul(betaForward.neg().add(1.0).sqrt()).add(muCoeff.mul(betaForward.sqrt()));
+
+        // sigma = sqrt(beta_reverse)
+        NDArray sigma = betaReverse.sqrt();
 
         return new NDList(mu, sigma);
     }
@@ -233,7 +259,9 @@ public class DiffusionModel extends AbstractBlock {
         NDArray loss = kl.mul(isT0.neg().add(1)).add(reconLoss.mul(isT0));
 
         // Clip per-pixel loss to prevent extreme values
-        loss = loss.clip(-1e6, 1e6);
+        // For MNIST (28x28=784 pixels), a per-pixel loss of 100 gives total ~78400
+        // which is still very high. Normal training should see per-pixel losses < 10.
+        loss = loss.clip(-100, 100);
 
         // Sum over pixels, mean over batch (chain sum for PyTorch compatibility)
         NDArray result = loss.sum(new int[]{3}).sum(new int[]{2}).sum(new int[]{1}).mean();

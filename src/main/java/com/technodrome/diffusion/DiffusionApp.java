@@ -192,13 +192,46 @@ public class DiffusionApp {
             Sampler sampler = new Sampler(model, manager);
             ParameterStore parameterStore = new ParameterStore(manager, false);
 
+            // Check for NaN in model weights before sampling
+            int nanParams = 0;
+            int infParams = 0;
+            for (var pair : model.getParameters()) {
+                NDArray param = pair.getValue().getArray();
+                float maxVal = param.abs().max().getFloat();
+                if (Float.isNaN(maxVal)) {
+                    nanParams++;
+                    logger.warn("NaN detected in parameter: {}", pair.getKey());
+                } else if (Float.isInfinite(maxVal)) {
+                    infParams++;
+                    logger.warn("Inf detected in parameter: {}", pair.getKey());
+                }
+            }
+            if (nanParams > 0 || infParams > 0) {
+                logger.error("Model has {} NaN and {} Inf parameters - cannot generate samples", nanParams, infParams);
+                return;
+            }
+            logger.info("Model weights check passed - no NaN/Inf detected");
+
             // Generate samples
             logger.info("Generating {} samples...", numSamples);
             NDArray samples = sampler.generateSamples(numSamples, parameterStore);
 
+            // Log raw model output statistics
+            logger.info("Raw model output - min: {}, max: {}, mean: {}, std: {}",
+                    String.format("%.4f", samples.min().getFloat()),
+                    String.format("%.4f", samples.max().getFloat()),
+                    String.format("%.4f", samples.mean().getFloat()),
+                    String.format("%.4f", samples.sub(samples.mean()).pow(2).mean().sqrt().getFloat()));
+
             // Convert to image range
             DataPreprocessor preprocessor = DataPreprocessor.createMnistPreprocessor();
             samples = preprocessor.inversePreprocess(samples);
+
+            // Log post-processing statistics
+            logger.info("After inverse preprocess - min: {}, max: {}, mean: {}",
+                    String.format("%.4f", samples.min().getFloat()),
+                    String.format("%.4f", samples.max().getFloat()),
+                    String.format("%.4f", samples.mean().getFloat()));
 
             // Save
             int gridCols = (int) Math.ceil(Math.sqrt(numSamples));

@@ -34,11 +34,18 @@ public class TrainingConfig {
     private double rmspropEpsilon = 1e-8;
     private double gradientClipNorm = 1.0;
 
+    // Adaptive learning rate (reduce on plateau)
+    private boolean useAdaptiveLR = true;
+    private int lrPatience = 8;           // Epochs to wait before reducing LR
+    private double lrReductionFactor = 0.5;  // Multiply LR by this when reducing
+    private double minLearningRate = 1e-9;   // Don't reduce below this
+    private double lrThreshold = 0.01;       // Minimum relative improvement to count as progress
+
     // Training schedule
     private int numEpochs = 2000;
     private int logEveryNSteps = 100;
-    private int checkpointEveryNEpochs = 100;
-    private int sampleEveryNEpochs = 100;
+    private int checkpointEveryNEpochs = 10;
+    private int sampleEveryNEpochs = 10;
 
     // Data
     private int imageChannels = 1;
@@ -168,6 +175,31 @@ public class TrainingConfig {
         return this;
     }
 
+    public TrainingConfig setUseAdaptiveLR(boolean useAdaptiveLR) {
+        this.useAdaptiveLR = useAdaptiveLR;
+        return this;
+    }
+
+    public TrainingConfig setLrPatience(int lrPatience) {
+        this.lrPatience = lrPatience;
+        return this;
+    }
+
+    public TrainingConfig setLrReductionFactor(double lrReductionFactor) {
+        this.lrReductionFactor = lrReductionFactor;
+        return this;
+    }
+
+    public TrainingConfig setMinLearningRate(double minLearningRate) {
+        this.minLearningRate = minLearningRate;
+        return this;
+    }
+
+    public TrainingConfig setLrThreshold(double lrThreshold) {
+        this.lrThreshold = lrThreshold;
+        return this;
+    }
+
     public TrainingConfig setNumEpochs(int numEpochs) {
         this.numEpochs = numEpochs;
         return this;
@@ -274,6 +306,26 @@ public class TrainingConfig {
         return gradientClipNorm;
     }
 
+    public boolean isUseAdaptiveLR() {
+        return useAdaptiveLR;
+    }
+
+    public int getLrPatience() {
+        return lrPatience;
+    }
+
+    public double getLrReductionFactor() {
+        return lrReductionFactor;
+    }
+
+    public double getMinLearningRate() {
+        return minLearningRate;
+    }
+
+    public double getLrThreshold() {
+        return lrThreshold;
+    }
+
     public int getNumEpochs() {
         return numEpochs;
     }
@@ -332,6 +384,10 @@ public class TrainingConfig {
                 "  numLowerLayers=" + numLowerLayers + "\n" +
                 "  numUpperLayers=" + numUpperLayers + "\n" +
                 "  numScales=" + numScales + "\n" +
+                "  useAdaptiveLR=" + useAdaptiveLR + "\n" +
+                "  lrPatience=" + lrPatience + "\n" +
+                "  lrReductionFactor=" + lrReductionFactor + "\n" +
+                "  minLearningRate=" + minLearningRate + "\n" +
                 "}";
     }
 }

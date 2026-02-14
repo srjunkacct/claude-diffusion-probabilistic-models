@@ -23,6 +23,14 @@ public class Sampler {
 
     private static final Logger logger = LoggerFactory.getLogger(Sampler.class);
 
+    // Clamp xt values to prevent numerical explosion during sampling
+    // Images are normalized to ~[-1, 1], so allow some headroom
+    private static final float XT_CLAMP_VALUE = 5.0f;
+
+    // Scale factor for sigma during sampling (1.0 = full variance, 0.0 = deterministic/DDIM-like)
+    // Lower values help stabilize sampling with undertrained models
+    private static final float SIGMA_SCALE = 0.8f;
+
     private final DiffusionModel model;
     private final NDManager manager;
     private final int trajectoryLength;
@@ -62,6 +70,9 @@ public class Sampler {
         Shape sampleShape = new Shape(numSamples, imageChannels, imageHeight, imageWidth);
         NDArray x = manager.randomNormal(sampleShape);
 
+        // Track if we've already logged NaN detection
+        boolean nanDetected = false;
+
         // Run reverse diffusion from T to 0
         for (int t = trajectoryLength - 1; t >= 0; t--) {
             try (NDManager stepManager = manager.newSubManager()) {
@@ -70,6 +81,16 @@ public class Sampler {
                 xStep.attach(stepManager);
 
                 NDArray xNext = diffusionStepManaged(xStep, t, parameterStore, null, null, stepManager);
+
+                // Check for NaN and log first occurrence
+                if (!nanDetected) {
+                    float maxVal = xNext.abs().max().getFloat();
+                    if (Float.isNaN(maxVal) || Float.isInfinite(maxVal)) {
+                        logger.warn("NaN/Inf detected at timestep t={}, step {}/{}",
+                                t, trajectoryLength - t, trajectoryLength);
+                        nanDetected = true;
+                    }
+                }
 
                 // Copy result back to main manager before stepManager closes
                 x.close();
@@ -217,6 +238,16 @@ public class Sampler {
                                           NDArray originalImage, NDArray mask, NDManager stepManager) {
         long batchSize = xt.getShape().get(0);
 
+        // Check input for NaN and also track value magnitude
+        float xtMax = xt.abs().max().getFloat();
+        float xtMean = xt.mean().getFloat();
+        if (Float.isNaN(xtMax) || Float.isInfinite(xtMax)) {
+            logger.warn("Input xt is NaN/Inf at t={}", t);
+        } else if (xtMax > 100) {
+            // Values are getting large - potential for overflow
+            logger.warn("Input xt has large values at t={}: max={}, mean={}", t, xtMax, xtMean);
+        }
+
         // Create timestep array
         int[] timesteps = new int[(int) batchSize];
         java.util.Arrays.fill(timesteps, t);
@@ -227,13 +258,27 @@ public class Sampler {
         NDArray mu = muSigma.get(0);
         NDArray sigma = muSigma.get(1);
 
+        // Check mu and sigma for NaN (only log once at first occurrence)
+        float muMax = mu.abs().max().getFloat();
+        float sigmaMax = sigma.abs().max().getFloat();
+        float sigmaMin = sigma.min().getFloat();
+        if (Float.isNaN(muMax) || Float.isInfinite(muMax)) {
+            logger.warn("mu is NaN/Inf at t={}", t);
+        }
+        if (Float.isNaN(sigmaMax) || Float.isInfinite(sigmaMax) || sigmaMin <= 0) {
+            logger.warn("sigma is NaN/Inf/non-positive at t={}, min={}, max={} (will be scaled by {})",
+                    t, sigmaMin, sigmaMax, SIGMA_SCALE);
+        }
+
         // Sample x_{t-1} from N(mu, sigma^2)
+        // Apply sigma scaling to reduce variance and stabilize sampling
+        NDArray scaledSigma = sigma.mul(SIGMA_SCALE);
         NDArray noise = stepManager.randomNormal(xt.getShape());
         NDArray xPrev;
 
         if (t > 0) {
             // Add noise for t > 0
-            xPrev = mu.add(sigma.mul(noise));
+            xPrev = mu.add(scaledSigma.mul(noise));
         } else {
             // No noise at t = 0 (final step)
             xPrev = mu;
@@ -255,6 +300,14 @@ public class Sampler {
                 // At t=0, use clean original for masked regions
                 xPrev = InpaintMask.applyMask(originalImage, mask, xPrev);
             }
+        }
+
+        // Clamp values to prevent numerical explosion
+        // This is especially important early in training when model predictions are poor
+        float preClampMax = xPrev.abs().max().getFloat();
+        xPrev = xPrev.clip(-XT_CLAMP_VALUE, XT_CLAMP_VALUE);
+        if (preClampMax > XT_CLAMP_VALUE) {
+            logger.debug("Clamped xt at t={}: max {} -> {}", t, preClampMax, XT_CLAMP_VALUE);
         }
 
         return xPrev;
