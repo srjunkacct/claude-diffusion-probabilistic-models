@@ -35,10 +35,10 @@ public class TrainingConfig {
     private double gradientClipNorm = 1.0;
 
     // Adaptive learning rate (reduce on plateau)
-    private boolean useAdaptiveLR = true;
-    private int lrPatience = 8;           // Epochs to wait before reducing LR
+    private boolean useAdaptiveLR = false;
+    private int lrPatience = 5;           // Epochs to wait before reducing LR
     private double lrReductionFactor = 0.5;  // Multiply LR by this when reducing
-    private double minLearningRate = 1e-9;   // Don't reduce below this
+    private double minLearningRate = 1e-8;   // Don't reduce below this
     private double lrThreshold = 0.01;       // Minimum relative improvement to count as progress
 
     // Training schedule

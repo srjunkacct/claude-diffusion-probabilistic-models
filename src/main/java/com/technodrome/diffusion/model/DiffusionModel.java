@@ -224,48 +224,58 @@ public class DiffusionModel extends AbstractBlock {
         NDManager manager = x0.getManager();
         long batchSize = x0.getShape().get(0);
 
-        // Sample random timesteps for each batch item
-        NDArray t = manager.randomUniform(0, trajectoryLength, new Shape(batchSize))
+        // Sample random timesteps in [1, trajectoryLength) for each batch item.
+        // The reverse process is fixed for the very first timestep, so we skip it
+        // (matching reference implementation).
+        NDArray t = manager.randomUniform(1, trajectoryLength, new Shape(batchSize))
                 .floor().toType(DataType.INT32, false);
 
         // Forward diffusion: get x_t
         NDList forwardResult = getForwardDiffusionSample(x0, t, null);
         NDArray xt = forwardResult.get(0);
-        NDArray epsilon = forwardResult.get(1);
 
         // Get network predictions for mu and sigma
         NDList muSigma = getMuSigma(xt, t, parameterStore, training);
         NDArray muPred = muSigma.get(0);
         NDArray sigmaPred = muSigma.get(1);
 
-        // Compute the true posterior mean from the forward process
-        // mu_q = (sqrt(alpha_bar_{t-1}) * beta_t * x_0 + sqrt(alpha_t) * (1 - alpha_bar_{t-1}) * x_t) / (1 - alpha_bar_t)
+        // Compute the true posterior mean and std from the forward process
         int[] timesteps = t.toIntArray();
-        NDArray muTrue = computePosteriorMean(x0, xt, timesteps, manager);
-        NDArray sigmaTrue = computePosteriorStd(timesteps, manager);
+        NDArray muPosterior = computePosteriorMean(x0, xt, timesteps, manager);
+        NDArray sigmaPosterior = computePosteriorStd(timesteps, manager);
 
-        // Ensure sigmas are not too small to prevent division explosion
-        NDArray sigmaPredSafe = sigmaPred.maximum(MIN_SIGMA);
-        NDArray sigmaTrueSafe = sigmaTrue.maximum(MIN_SIGMA);
+        // KL divergence between posterior q and model p, per pixel
+        // KL = log(sigma_p) - log(sigma_q) + (sigma_q^2 + (mu_q - mu_p)^2) / (2 * sigma_p^2) - 0.5
+        NDArray kl = MathUtils.gaussianKL(muPosterior, sigmaPosterior, muPred, sigmaPred);
 
-        // KL divergence: D_KL(q || p) for each pixel
-        NDArray kl = MathUtils.gaussianKL(muTrue, sigmaTrueSafe, muPred, sigmaPredSafe);
+        // Conditional entropy terms (per the paper's variational bound)
+        double halfLogTwoPiE = 0.5 * (1.0 + Math.log(2.0 * Math.PI));
 
-        // For t=0, use reconstruction loss instead
-        NDArray isT0 = t.eq(0).toType(DataType.FLOAT32, false).reshape(-1, 1, 1, 1);
-        NDArray sigmaPredSq = sigmaPredSafe.pow(2).mul(2);
-        NDArray reconLoss = x0.sub(muPred).pow(2).div(sigmaPredSq)
-                .add(sigmaPredSafe.log());
-        NDArray loss = kl.mul(isT0.neg().add(1)).add(reconLoss.mul(isT0));
+        // H_startpoint = H_q(x^1|x^0) = 0.5*(1 + log(2*pi)) + 0.5*log(beta_1)
+        float beta1 = betas.toFloatArray()[0];
+        double hStartpoint = halfLogTwoPiE + 0.5 * Math.log(beta1);
 
-        // Clip per-pixel loss to prevent extreme values
-        // For MNIST (28x28=784 pixels), a per-pixel loss of 100 gives total ~78400
-        // which is still very high. Normal training should see per-pixel losses < 10.
-        loss = loss.clip(-100, 100);
+        // H_endpoint = H_q(x^T|x^0) = 0.5*(1 + log(2*pi)) + 0.5*log(1 - alpha_bar_T)
+        float[] alphaCumprodData = alphaCumprod.toFloatArray();
+        double betaFullTrajectory = 1.0 - alphaCumprodData[trajectoryLength - 1];
+        double hEndpoint = halfLogTwoPiE + 0.5 * Math.log(betaFullTrajectory);
 
-        // Sum over pixels, mean over batch (chain sum for PyTorch compatibility)
-        NDArray result = loss.sum(new int[]{3}).sum(new int[]{2}).sum(new int[]{1}).mean();
-        return result;
+        // H_prior = H(N(0,I)) = 0.5*(1 + log(2*pi)) + 0.5*log(1) = 0.5*(1 + log(2*pi))
+        double hPrior = halfLogTwoPiE;
+
+        // negL_bound = KL * T + H_startpoint - H_endpoint + H_prior
+        double entropyCorrection = hStartpoint - hEndpoint + hPrior;
+        NDArray negLBound = kl.mul(trajectoryLength).add(entropyCorrection);
+
+        // Subtract isotropic Gaussian baseline
+        double negLGauss = halfLogTwoPiE;
+        NDArray negLDiff = negLBound.sub(negLGauss);
+
+        // Convert from nats to bits
+        NDArray lDiffBits = negLDiff.div(Math.log(2.0));
+
+        // Average over all dimensions (batch, channels, height, width), scale by n_colors
+        return lDiffBits.mean().mul(imageChannels);
     }
 
     private NDArray computePosteriorMean(NDArray x0, NDArray xt, int[] timesteps, NDManager manager) {

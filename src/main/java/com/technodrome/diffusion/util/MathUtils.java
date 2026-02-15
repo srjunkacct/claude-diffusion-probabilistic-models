@@ -93,8 +93,6 @@ public final class MathUtils {
         return logRatio
                 .add( sigma1.pow(2).add( mu1.sub(mu2).pow(2) ).div( sigma2.pow(2).mul(2 ) ) )
                                 .sub(0.5 );
-
-        // return logRatio.add(varianceRatio.add(muDiff).sub(1.0).mul(0.5));
     }
 
     /**
